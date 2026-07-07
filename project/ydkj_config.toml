@@ -1,0 +1,8 @@
+project_name = "ydkj"
+file_path = "../extracted/default.xex"
+out_directory_path = "generated"
+
+# Bring-up hints
+[functions]
+# UnresolvedCall: tail-call target not placed in any function (b 0x82236F38 from 0x822387AC)
+0x82236F38 = { name = "ydkj_sub_82236F38" }

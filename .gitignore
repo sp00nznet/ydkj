@@ -1,0 +1,48 @@
+# ── Game data — bring your own disc image / XEX (copyrighted, NEVER committed) ──
+*.iso
+*.zip
+*.rar
+*.7z
+extracted/
+You Dont Know Jack*/
+
+# ── ReXGlue codegen output (regenerate: rexglue codegen project/ydkj_config.toml) ──
+project/generated/
+
+# ── ReXGlue SDK (external dependency, referenced via $REXSDK) ──
+tools/rexglue-sdk/
+
+# ── Build artifacts ──
+build/
+out/
+project/out/
+cmake-build-*/
+.vs/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.dll
+
+# ── Logs / scratch ──
+*.log
+
+# ── IDE ──
+.idea/
+.vscode/
+*.suo
+*.user
+
+# ── Claude / agent scaffolding — NEVER leak ──
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# ── OS ──
+Thumbs.db
+.DS_Store
+
+# ── Python ──
+__pycache__/
+*.pyc
