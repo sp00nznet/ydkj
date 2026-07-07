@@ -1,10 +1,7 @@
 # You Don't Know Jack — Development Progress
 
-Toolchain: **ReXGlue SDK v0.1.0** (the version installed on this machine).
-Note: the current 360-recomp house style has moved to ReXGlue v0.8.0
-(`rexglue init` / `rexglue codegen` with auto-hint resolution); v0.8.0 wasn't
-checked out here, so this project uses the v0.1.0 config-driven flow. The repo
-layout and hygiene follow the current house style either way.
+Toolchain: **ReXGlue SDK v0.8.0** (self-contained; `rexglue init` / `rexglue
+codegen`, no XenonRecomp).
 
 ## Phase 1: Extraction & Triage (DONE)
 
@@ -16,92 +13,95 @@ layout and hygiene follow the current house style either way.
   The disc is huge because the game is a quiz show — almost all of it is audio
   and FMV question content, not code.
 - `xex_info.py` triage of `default.xex`:
-  - Image base `0x82000000` (standard — runtime handles this class cleanly).
-  - Image size `0x650000` (**6.3 MB** of actual code/data).
+  - Image base `0x82000000` (standard). Image size `0x650000` (**6.3 MB** code).
   - Imports: `xam.xex`, `xboxkrnl.exe` only. **No XNET/Live import wall.**
+  - Title ID `0x54510869` (from the runtime's shader-storage init log) — publisher
+    code `0x5451` = `"TQ"` = THQ.
   - Cute detail: the `ORIGINAL_BASE_ADDRESS` header field reads `0x4A61636B`,
-    which is ASCII **"Jack"**.
+    ASCII **"Jack"**.
 
 ## Phase 2: Scaffold & Codegen (DONE)
 
-- `rexglue init --app_name ydkj --app_root .` → `CMakeLists.txt`,
-  `CMakePresets.json`, `src/main.cpp`, `ydkj_config.toml`.
-- Pointed `file_path` at `../extracted/default.xex` and ran `rexglue codegen`:
-  - **First pass:** decoded **876,806 instructions** across the code regions;
-    `10,289` functions from PDATA; iterative discovery + a 52-vtable / 43-function
-    scan + gap-fill → 14,551 functions. Then **one** `UnresolvedCall`:
-    `b 0x82236F38 from 0x822387AC — target not in any function` (a tail-call
-    branch discovery hadn't sealed into a function).
-  - Added a single `[functions]` hint: `0x82236F38 = { name = "ydkj_sub_82236F38" }`
-    (entry-only; discovery sizes it).
-  - **Second pass: clean** — "all calls resolve", 14,552 functions ready,
-    **14,343 recompiled**.
-  - Output: **30 `.cpp` files, ~59 MB** in `project/generated/` (git-ignored).
-  - Imports: **209 kernel/XAM imports** resolved, 0 unresolved, 13 variables
-    skipped.
+- `rexglue init --project-name ydkj --xex-path extracted/default.xex
+  --game-root extracted --project-root project` → manifest, CMake, `src/main.cpp`,
+  `src/ydkj_app.h`.
+- `rexglue codegen`:
+  - **First pass:** one `UnresolvedCall` — `b 0x82236F38 from 0x822387AC`, a
+    tail-call branch target outside any discovered function.
+  - Added it as an entry-only `[entrypoint.functions]` hint (discovery sizes it).
+  - **Second pass: clean.** A few non-fatal "unresolved b target" Write-phase
+    notes remain (intra-function boundary heuristics — harmless).
+  - Output: **29 `.cpp` files, ~59 MB** in `project/generated/default/`
+    (git-ignored), **14,552 functions** at this stage.
 
-## Phase 3: Build (DONE — links clean after 14 stubs)
+## Phase 3: Build (DONE — links with ZERO stubs)
 
-- Configured with Clang 21 / Ninja / lld-link against the ReXGlue SDK v0.1.0
-  install (via `REXSDK`). All **30 recomp TUs compiled first try.**
-- The link failed on kernel/XAM imports the v0.1.0 runtime doesn't export.
-  lld-link caps reported errors at 20, so instead of iterating we computed the
-  **full** missing set deterministically: the game references 209 `__imp__`
-  kernel symbols; the SDK libs define 440; the diff is exactly **14 missing**:
+- Configured with Clang 21 / Ninja / lld-link against the ReXGlue SDK v0.8.0
+  install (`-DCMAKE_PREFIX_PATH=...`). All recomp TUs compiled first try.
+- Checked the link gap **before** building by diffing the game's `__imp__`
+  symbols against the SDK libs: the game references **209** kernel/XAM imports;
+  the v0.8.0 `rexruntime.lib` defines all of them. **Zero missing** → no
+  `stubs.cpp` needed (unusual and nice — most titles need at least the XUsbcam
+  bundle; this one imports none of it).
+- **Linked: `ydkj.exe`, ~21 MB.**
 
-  | Group | Symbols |
-  |-------|---------|
-  | Xbox LIVE / net | `XNetLogonGetTitleID`, `NetDll_XNetGetConnectStatus`, `NetDll_XNetQosLookup`, `NetDll_XNetConnect`, `NetDll_WSAGetOverlappedResult` |
-  | XAM user/stats/voice | `XamUserGetMembershipTierFromXUID`, `XamUserGetOnlineCountryFromXUID`, `XamUserCreateStatsEnumerator`, `XamVoiceSubmitPacket` |
-  | XAM blade UI | `XamShowGamerCardUIForXUID`, `XamShowMarketplaceUI`, `XamShowFriendsUI` |
-  | xboxkrnl helpers | `ObReferenceObject`, `ExAllocatePoolWithTag` |
+## Phase 4: Boot & bring-up (DONE — unregistered-function class cleared)
 
-- `src/kernel_stubs.cpp` defines all 14 with the standard `PPC_FUNC_IMPL`
-  signature. Every LIVE/voice/stats/marketplace/friends symbol is off the
-  single-player path, so they log-once and return 0. `ObReferenceObject` returns
-  the object pointer it was handed (so callers don't null-fault);
-  `ExAllocatePoolWithTag` returns 0 for now (promote to a real guest-heap alloc
-  if a boot trace ever shows it on a hot path).
-- **Linked: `ydkj.exe`, 28,230,144 bytes (28 MB).**
+The build is minutes of work; the runtime is the craft. First boot got a long,
+**healthy** way in before the expected wall:
 
-## Phase 4: Boot (DONE — crash-free into asset streaming)
+- Clean runtime bring-up: **D3D12 device (NVIDIA RTX 5070)** → XMA Decoder +
+  Audio Worker threads → mounted `extracted/` as the guest disk → GPU Commands +
+  GPU VSync threads → `GPU system initialized (presentation=true)` →
+  `Runtime initialized successfully`.
+- **Loaded `default.xex`**, spun up Kernel Dispatch, `Initializing shader storage
+  for title 54510869`, resolved XAM party/UI ordinals via generated thunks,
+  registered the GPU interrupt callback (`SetInterruptCallback`).
+- First crash: `[FATAL] Call to invalid or unregistered function at 0x82131FF0`
+  — the house-standard bring-up class (a target discovery didn't place in a
+  function; v0.8.0's discovery is stricter than v0.1.0's gap-fill).
 
-First run (`ydkj.exe <extracted>`), logged to a file sink:
+Cleared the whole class in two moves:
 
-- Clean runtime bring-up: SDL input → **XMA Decoder + Audio Worker** threads →
-  mounted `extracted/` as the guest disk → **D3D12 GPU backend, NVIDIA RTX 5070**
-  adapter, D3D12 device created → GPU Commands + GPU VSync threads →
-  `GPU system initialized (presentation=true)` → `Runtime initialized successfully`.
-- **Loaded `default.xex`** (`game:\default.xex`), spun up the Kernel Dispatch
-  thread, and handed control to guest code.
-- Guest execution proceeded and stayed healthy: registered a GPU interrupt
-  callback (`SetInterruptCallback`), then streamed `GAME:\shaders` (many reads —
-  the game loading its shader set) and `GAME:\flash` (Scaleform UI), with the XMA
-  decoder actively consuming audio the whole time.
-- Across the entire run: **0 FATALs, 0 unregistered-function crashes.** The only
-  warnings were benign — six missing `xam` ordinals (the online functions we
-  stubbed), a `default.xexp` patch-file probe (there is none), and a stream of
-  `XMA: Write to unknown register (0601)` (audio hardware register the runtime's
-  XMA model doesn't model — harmless).
-- The run was terminated manually after ~15 s; it was still executing and
-  decoding audio at that point, not crashing.
+1. **Batch vtable/thunk registration.** `extract_pe.py` decompressed the image
+   cleanly (6.6 MB PE — no LZX-variant trouble). `find_missing_vtable_funcs.py`
+   scanned it against the generated `ydkj_init.cpp` → **231 missing entries**
+   (26 C++ adjustor thunks + 205 function entry points) reachable only through
+   vtable / RTTI pointer tables in the data section. Registered all 231 as
+   `[entrypoint.functions]` hints. That cleared `0x82131FF0` and its class.
+2. **Runtime harvest for computed targets.** A few functions are reached by
+   `lis/addi`-computed addresses that pointer scans can't see. Built with
+   `-DYDKJ_HARVEST=ON` (a tolerant indirect dispatcher, `src/dispatch_tolerance.cpp`,
+   that logs each unique unregistered target instead of fataling). One run
+   surfaced exactly **2** (`0x822814A8`, `0x82404568`); registered them too.
+   **Total hints: 234.**
+
+Rebuilt with real dispatch (`YDKJ_HARVEST=OFF`): **boots crash-free** into the
+render loop, **14,781 functions**.
+
+## Phase 5: Front-end → title screen (REACHED — renders)
+
+Captured directly from the running port's window (`PrintWindow`):
+
+- **THQ publisher splash** renders (`images/thq_splash.png`) — the chrome THQ
+  logo on black.
+- **Lands on the "YOU DON'T KNOW JACK" title screen** (`images/title_screen.png`)
+  — the logo, the smoky background, and **fully-rendered text** including the
+  `PRESS ▶ START TO BEGIN` prompt. **Text renders correctly** — no memexport /
+  glyph gap.
 
 ## What's NOT yet verified
 
-- **On-screen rendering.** This was a headless session — no captured frame, and
-  a targeted `PrintWindow` grab of the game window returned no handle (the window
-  may not present in a non-interactive session). We know the GPU device is up and
-  the game is loading shaders/UI, but we have **not** confirmed pixels on screen.
-- **Gameplay / input.** Not driven.
+- **Input into a question round.** The title screen is interactive
+  (`PRESS START`) but gameplay past it hasn't been driven.
+- **Audio output.** XMA is decoding (the audio threads run and consume banks);
+  actual output not confirmed.
 
 ## Next up (TODO)
 
-- [ ] Capture the first rendered frame (run in an interactive desktop session;
-      confirm the presenter shows the intro / attract screen). This is the single
-      highest-value next step — it upgrades the status from "boots" to "renders".
-- [ ] Drive input (SDL keyboard/gamepad) through the intro into a round.
-- [ ] Audio verification — the `.fsb`/XMA banks are being decoded; confirm output.
-- [ ] Watch `ExAllocatePoolWithTag`: if a trace shows real allocations, wire it to
-      the guest heap instead of returning 0.
-- [ ] Re-run on ReXGlue v0.8.0 when available and compare (the house-standard
-      toolchain; may change function counts and the stub set).
+- [ ] Drive START → into an episode/round; confirm question rendering, buzz-in,
+      and scoring. Text already renders, so this should be close.
+- [ ] Verify audio output (the `.fsb`/XMA banks are being decoded).
+- [ ] Input mapping (SDL keyboard/gamepad) for the four "player" buttons.
+- [ ] Retire the bring-up scaffold (`src/dispatch_tolerance.cpp`) once gameplay
+      is confirmed clean — kept for now, off by default.
